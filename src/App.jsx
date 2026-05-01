@@ -3,8 +3,8 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
-import { saveReading, pruneReadings } from './lib/database'
-import { Activity, AlertTriangle, Clock, WifiOff } from 'lucide-react'
+import { saveReading, getReadings, pruneReadings } from './lib/database'
+import { Activity, AlertTriangle, Clock, WifiOff, Database } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
 import GaugeDetail from './pages/GaugeDetail'
@@ -14,15 +14,42 @@ export default function App() {
   const [lastUpdate, setLastUpdate] = useState(null)
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
-  const isFirstFetch = useRef(true)
+  const [isStale, setIsStale] = useState(false)
+  const usgsResponded = useRef(false)
 
   useEffect(() => {
-    // Prune readings older than 30 days once on startup
     pruneReadings(30)
+    // Load cached DB data immediately so the UI renders without waiting for USGS
+    loadCachedData()
     fetchData()
     const i = setInterval(fetchData, 60000)
     return () => clearInterval(i)
   }, [])
+
+  async function loadCachedData() {
+    const processed = {}
+    for (const g of GAUGES) {
+      const readings = await getReadings(g.id, 7)
+      if (!readings.length) continue
+      const latest = readings[readings.length - 1]
+      const rates = calculateRates(readings, latest)
+      const alert = getAlertLevel(rates)
+      processed[g.id] = {
+        height: latest.height,
+        flow: latest.flow,
+        time: latest.time,
+        history: readings,
+        alert,
+        rates
+      }
+    }
+    // Only apply cached data if USGS hasn't already responded
+    if (Object.keys(processed).length > 0 && !usgsResponded.current) {
+      setData(processed)
+      setIsStale(true)
+      setLoading(false)
+    }
+  }
 
   async function fetchData() {
     try {
@@ -40,23 +67,21 @@ export default function App() {
 
         processed[g.id] = { ...d, alert, rates }
 
-        // Persist the current reading to IndexedDB (fire-and-forget)
         if (d.time) {
           saveReading(g.id, { height: d.height, flow: d.flow, time: d.time })
         }
       }
 
+      usgsResponded.current = true
       setData(processed)
       setLastUpdate(new Date())
+      setIsStale(false)
       setFetchError(false)
     } catch (err) {
       console.error('Failed to fetch data:', err)
       setFetchError(true)
     } finally {
-      if (isFirstFetch.current) {
-        isFirstFetch.current = false
-        setLoading(false)
-      }
+      setLoading(false)
     }
   }
 
@@ -97,6 +122,13 @@ export default function App() {
           <div className="error-banner" role="alert">
             <WifiOff size={16} />
             Unable to reach USGS servers. Displaying last known readings.
+          </div>
+        )}
+
+        {isStale && !fetchError && (
+          <div className="stale-banner" role="status">
+            <Database size={14} />
+            Showing cached readings — live data loading…
           </div>
         )}
 

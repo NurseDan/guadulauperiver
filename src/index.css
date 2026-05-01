@@ -520,8 +520,11 @@ body {
 }
 
 .stale-banner {
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.35);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid rgba(245, 158, 11, 0.30);
   color: #fcd34d;
   border-radius: 8px;
   padding: 8px 14px;
