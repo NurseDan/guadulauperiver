@@ -1,11 +1,11 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
 import { saveReading, getReadings, pruneReadings } from './lib/database'
 import { fetchNWSAlerts } from './lib/nwsAlerts'
-import { Activity, AlertTriangle, Clock, WifiOff, Database } from 'lucide-react'
+import { Activity, AlertTriangle, Clock, WifiOff, Database, RefreshCw } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
 import GaugeDetail from './pages/GaugeDetail'
@@ -17,6 +17,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
   const [isStale, setIsStale] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [nwsAlerts, setNwsAlerts] = useState([])
   const usgsResponded = useRef(false)
 
@@ -26,7 +27,6 @@ export default function App() {
     fetchData()
     fetchNWSAlerts().then(setNwsAlerts)
     const i = setInterval(fetchData, 60000)
-    // Refresh NWS alerts every 5 minutes
     const j = setInterval(() => fetchNWSAlerts().then(setNwsAlerts), 5 * 60000)
     return () => { clearInterval(i); clearInterval(j) }
   }, [])
@@ -48,7 +48,6 @@ export default function App() {
         rates
       }
     }
-    // Only apply cached data if USGS hasn't already responded
     if (Object.keys(processed).length > 0 && !usgsResponded.current) {
       setData(processed)
       setIsStale(true)
@@ -62,16 +61,12 @@ export default function App() {
       const usgsData = await fetchUSGSGauges(ids)
 
       const processed = {}
-
       for (const g of GAUGES) {
         const d = usgsData[g.id]
         if (!d) continue
-
         const rates = calculateRates(d.history || [], d)
         const alert = getAlertLevel(rates)
-
         processed[g.id] = { ...d, alert, rates }
-
         if (d.time) {
           saveReading(g.id, { height: d.height, flow: d.flow, time: d.time })
         }
@@ -89,6 +84,19 @@ export default function App() {
       setLoading(false)
     }
   }
+
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    try {
+      await Promise.all([
+        fetchData(),
+        fetchNWSAlerts().then(setNwsAlerts)
+      ])
+    } finally {
+      setRefreshing(false)
+    }
+  }, [refreshing])
 
   const formatCDT = (dateStr) => {
     if (!dateStr) return '—'
@@ -116,9 +124,20 @@ export default function App() {
               <AlertTriangle size={16} />
               System Status: {ALERT_LEVELS[highestAlert]?.label || 'Normal'}
             </div>
-            <div className="header-time" style={{ marginTop: '8px', fontWeight: '500' }}>
-              <Clock size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
-              Refreshed: {lastUpdate ? formatCDT(lastUpdate) : 'Loading…'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
+              <div className="header-time">
+                <Clock size={13} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
+                {lastUpdate ? formatCDT(lastUpdate) : 'Loading…'}
+              </div>
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="refresh-btn"
+                title="Refresh now"
+              >
+                <RefreshCw size={13} className={refreshing ? 'spin' : ''} />
+                {refreshing ? 'Refreshing…' : 'Refresh'}
+              </button>
             </div>
           </div>
         </header>
@@ -148,11 +167,28 @@ export default function App() {
           <Routes>
             <Route
               path="/"
-              element={<Dashboard data={data} formatCDT={formatCDT} highestAlert={highestAlert} lastUpdate={lastUpdate} />}
+              element={
+                <Dashboard
+                  data={data}
+                  formatCDT={formatCDT}
+                  highestAlert={highestAlert}
+                  lastUpdate={lastUpdate}
+                  onRefresh={handleRefresh}
+                  refreshing={refreshing}
+                />
+              }
             />
             <Route
               path="/gauge/:id"
-              element={<GaugeDetail data={data} formatCDT={formatCDT} nwsAlerts={nwsAlerts} />}
+              element={
+                <GaugeDetail
+                  data={data}
+                  formatCDT={formatCDT}
+                  nwsAlerts={nwsAlerts}
+                  onRefresh={handleRefresh}
+                  refreshing={refreshing}
+                />
+              }
             />
           </Routes>
         )}
