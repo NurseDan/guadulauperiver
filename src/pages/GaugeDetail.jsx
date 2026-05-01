@@ -7,9 +7,10 @@ import { ALERT_LEVELS } from '../lib/alertEngine'
 import { detectSurges, getDownstreamRisk } from '../lib/surgeEngine'
 import { projectTrend, rainAdjustPredictions } from '../lib/predictionEngine'
 import RiverChart, { buildChartData } from '../components/RiverChart'
+import NWSAlertBanner from '../components/NWSAlertBanner'
 import { ArrowLeft, AlertTriangle, Activity, Cpu, ArrowDown, ArrowUp } from 'lucide-react'
 
-export default function GaugeDetail({ data, formatCDT }) {
+export default function GaugeDetail({ data, formatCDT, nwsAlerts = [] }) {
   const { id } = useParams()
   const gaugeConfig = GAUGES.find(g => g.id === id)
   const d = data[id]
@@ -143,6 +144,8 @@ export default function GaugeDetail({ data, formatCDT }) {
       <Link to="/" className="back-link">
         <ArrowLeft size={16} /> Back to Dashboard
       </Link>
+
+      <NWSAlertBanner alerts={nwsAlerts} />
 
       {/* ── Header ── */}
       <div className="glass-panel" style={{ marginBottom: 24 }}>

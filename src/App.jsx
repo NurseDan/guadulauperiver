@@ -4,10 +4,12 @@ import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
 import { saveReading, getReadings, pruneReadings } from './lib/database'
+import { fetchNWSAlerts } from './lib/nwsAlerts'
 import { Activity, AlertTriangle, Clock, WifiOff, Database } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
 import GaugeDetail from './pages/GaugeDetail'
+import NWSAlertBanner from './components/NWSAlertBanner'
 
 export default function App() {
   const [data, setData] = useState({})
@@ -15,15 +17,18 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
   const [isStale, setIsStale] = useState(false)
+  const [nwsAlerts, setNwsAlerts] = useState([])
   const usgsResponded = useRef(false)
 
   useEffect(() => {
     pruneReadings(30)
-    // Load cached DB data immediately so the UI renders without waiting for USGS
     loadCachedData()
     fetchData()
+    fetchNWSAlerts().then(setNwsAlerts)
     const i = setInterval(fetchData, 60000)
-    return () => clearInterval(i)
+    // Refresh NWS alerts every 5 minutes
+    const j = setInterval(() => fetchNWSAlerts().then(setNwsAlerts), 5 * 60000)
+    return () => { clearInterval(i); clearInterval(j) }
   }, [])
 
   async function loadCachedData() {
@@ -132,6 +137,8 @@ export default function App() {
           </div>
         )}
 
+        <NWSAlertBanner alerts={nwsAlerts} />
+
         {loading ? (
           <div className="loading-screen">
             <div className="loading-spinner" aria-label="Loading gauge data" />
@@ -145,7 +152,7 @@ export default function App() {
             />
             <Route
               path="/gauge/:id"
-              element={<GaugeDetail data={data} formatCDT={formatCDT} />}
+              element={<GaugeDetail data={data} formatCDT={formatCDT} nwsAlerts={nwsAlerts} />}
             />
           </Routes>
         )}
