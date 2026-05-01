@@ -3,235 +3,385 @@ import { useParams, Link } from 'react-router-dom'
 import { GAUGES } from '../config/gauges'
 import { fetchPrecipitationForecast } from '../lib/weatherApi'
 import { ALERT_LEVELS } from '../lib/alertEngine'
-import Sparkline from '../components/Sparkline'
-import { ArrowLeft, AlertTriangle, CloudRain, Activity, Cpu } from 'lucide-react'
+import { detectSurges, getDownstreamRisk } from '../lib/surgeEngine'
+import { projectTrend, rainAdjustPredictions } from '../lib/predictionEngine'
+import TrendChart from '../components/TrendChart'
+import { ArrowLeft, AlertTriangle, Activity, Cpu, ArrowDown, ArrowUp } from 'lucide-react'
 
 export default function GaugeDetail({ data, formatCDT }) {
   const { id } = useParams()
   const gaugeConfig = GAUGES.find(g => g.id === id)
   const d = data[id]
-  
+
   const [forecast, setForecast] = useState(null)
   const [loadingForecast, setLoadingForecast] = useState(true)
+  const [forecastError, setForecastError] = useState(false)
+  const [predictions, setPredictions] = useState([])
 
+  // Fetch weather forecast when gauge changes
   useEffect(() => {
     if (!gaugeConfig) return
-    
-    async function loadForecast() {
-      setLoadingForecast(true)
-      const res = await fetchPrecipitationForecast(gaugeConfig.lat, gaugeConfig.lng)
-      setForecast(res)
+    setLoadingForecast(true)
+    setForecastError(false)
+    fetchPrecipitationForecast(gaugeConfig.lat, gaugeConfig.lng).then(res => {
+      if (res === null) setForecastError(true)
+      else setForecast(res)
       setLoadingForecast(false)
-    }
-    loadForecast()
-  }, [gaugeConfig])
+    })
+  }, [gaugeConfig?.id])
+
+  // Recompute trend projection whenever data or forecast updates
+  useEffect(() => {
+    if (!d?.history?.length) return
+    const base = projectTrend(d.history, 6)
+    setPredictions(forecast ? rainAdjustPredictions(base, forecast) : base)
+  }, [d?.time, forecast])
 
   if (!gaugeConfig || !d) {
     return (
       <div className="glass-panel" style={{ textAlign: 'center', marginTop: 40 }}>
-        <h2>Loading Gauge Data...</h2>
-        <Link to="/" style={{ color: '#60a5fa', textDecoration: 'none' }}>&larr; Return to Dashboard</Link>
+        <h2 style={{ marginBottom: 16 }}>Loading Gauge Data…</h2>
+        <Link to="/" style={{ color: '#60a5fa', textDecoration: 'none' }}>← Return to Dashboard</Link>
       </div>
     )
   }
 
   const alertClass = d.alert || 'GREEN'
   const alertLabel = ALERT_LEVELS[alertClass]?.label || 'Normal'
-  const floodStage = gaugeConfig.floodStageFt || 20 // Default visual max if unknown
-  
-  // Calculate percentage for thermometer
   const height = d.height || 0
-  const maxVisual = Math.max(floodStage * 1.2, height * 1.1, 10)
+  const floodStage = gaugeConfig.floodStageFt
+  const floodPct = floodStage ? Math.min((height / floodStage) * 100, 100) : null
+  const isStale = d.time ? (Date.now() - new Date(d.time).getTime()) > 15 * 60 * 1000 : false
+
+  const rate5 = d.rates?.rise5m ?? 0
+  const rate15 = d.rates?.rise15m ?? 0
+  const rate60 = d.rates?.rise60m ?? 0
+
+  // Surge / downstream risk
+  const surgeEvents = detectSurges(data)
+  const upstreamThreat = getDownstreamRisk(id, surgeEvents)       // this gauge is receiving a surge
+  const downstreamWarning = surgeEvents.find(e => e.sourceGaugeId === id)  // this gauge is warning downstream
+
+  // Flood stage meter geometry
+  const maxVisual = Math.max(floodStage ? floodStage * 1.2 : 20, height * 1.1, 10)
   const fillPercent = Math.min((height / maxVisual) * 100, 100)
-  const floodLinePercent = Math.min((floodStage / maxVisual) * 100, 100)
+  const floodLinePercent = floodStage ? Math.min((floodStage / maxVisual) * 100, 100) : null
 
-  // AI Surge Predictor Logic
-  let aiMessage = "Analyzing conditions..."
-  let aiColor = "#94a3b8"
-  
-  if (forecast && d.rates) {
-    const riseRate = d.rates.rise60m || 0
+  // Predicted values
+  const predPeak = predictions.length ? Math.max(...predictions.map(p => p.height)) : null
+  const predIn6h = predictions.at(-1)?.height ?? null
+
+  // AI Surge Predictor message
+  let aiMessage = forecastError
+    ? 'Weather forecast unavailable. Monitor conditions manually.'
+    : 'Analyzing conditions…'
+  let aiColor = '#94a3b8'
+
+  if (!forecastError && forecast !== null && d.rates) {
     const rain = forecast.totalInches || 0
-    
-    if (rain > 1 && riseRate > 1) {
-      aiMessage = `CRITICAL DANGER: Localized AI modeling projects high likelihood of severe overbanking. Current 1hr rise rate of ${riseRate.toFixed(1)}ft compounded by ${rain.toFixed(1)}" of forecasted upstream precipitation.`
-      aiColor = "#ef4444" // red
-    } else if (rain > 0.5 && riseRate > 0) {
-      aiMessage = `WARNING: Expected surge acceleration. ${rain.toFixed(1)}" of rain is forecasted, which will exacerbate the current rising trend of ${riseRate.toFixed(2)}ft/hr.`
-      aiColor = "#f97316" // orange
-    } else if (rain > 0.5 && riseRate <= 0) {
-      aiMessage = `WATCH: River is currently stable, but ${rain.toFixed(1)}" of precipitation is incoming. Expect delayed swelling and possible moderate rises.`
-      aiColor = "#f59e0b" // yellow
-    } else if (riseRate > 0.5) {
-      aiMessage = `WARNING: Rapid rise of ${riseRate.toFixed(1)}ft/hr detected with no significant incoming rain. Danger is likely from immediate localized runoff or upstream releases.`
-      aiColor = "#f97316" // orange
+    const rise = rate60
+    if (rain > 1 && rise > 1) {
+      aiMessage = `CRITICAL: ${rain.toFixed(1)}" forecasted with a ${rise.toFixed(1)} ft/hr rise rate. Severe overbank risk is very high. Evacuate low-water crossings immediately.`
+      aiColor = '#ef4444'
+    } else if (rain > 0.5 && rise > 0) {
+      aiMessage = `WARNING: ${rain.toFixed(1)}" incoming will accelerate the current ${rise.toFixed(2)} ft/hr rise. Expect surge conditions within 2–4 hours.`
+      aiColor = '#f97316'
+    } else if (rain > 0.5) {
+      aiMessage = `WATCH: ${rain.toFixed(1)}" of precipitation forecasted. River is currently stable but expect delayed rises as upstream runoff accumulates.`
+      aiColor = '#f59e0b'
+    } else if (rise > 0.5) {
+      aiMessage = `WARNING: Rising at ${rise.toFixed(1)} ft/hr with no significant rain — likely upstream release or localized flash runoff. Monitor closely.`
+      aiColor = '#f97316'
     } else {
-      aiMessage = `STABLE: No significant precipitation forecasted (${rain.toFixed(2)}"). River behavior is expected to follow normal discharge curves without sudden surges.`
-      aiColor = "#10b981" // green
+      aiMessage = `STABLE: ${rain.toFixed(2)}" forecasted with no significant rise trend. No surge risk is anticipated in the next 6 hours.`
+      aiColor = '#10b981'
     }
   }
 
-  const historyHeights = d.history ? d.history.map(h => h.height).filter(h => typeof h === 'number' && !isNaN(h)) : []
-
-  // Flow Rate Assessment Logic
-  let flowMessage = "No flow data available."
-  let flowColor = "#94a3b8"
+  // Flow assessment
   const flow = d.flow || 0
-  
+  let flowLabel = 'No Data', flowColor = '#94a3b8', flowDesc = 'Flow rate unavailable.'
   if (d.flow !== undefined) {
-    if (flow > 5000) {
-      flowMessage = "Severe / Flood Flow: Extremely dangerous, life-threatening currents. Avoid all water activities."
-      flowColor = "#ef4444"
-    } else if (flow > 2000) {
-      flowMessage = "Dangerous Flow: Very swift, powerful currents. High risk of debris. Stay out of the main channel."
-      flowColor = "#f97316"
-    } else if (flow > 500) {
-      flowMessage = "Fast Flow: Swift currents. Hazardous for inexperienced swimmers or casual tubing."
-      flowColor = "#f59e0b"
-    } else if (flow > 100) {
-      flowMessage = "Normal Flow: Typical recreational conditions. Moving at a steady, manageable pace."
-      flowColor = "#10b981"
-    } else {
-      flowMessage = "Low Flow: Water is moving very slowly. Generally safe for casual recreation."
-      flowColor = "#60a5fa"
-    }
+    if (flow > 5000)      { flowLabel = 'Severe / Flood';  flowColor = '#ef4444'; flowDesc = 'Life-threatening currents and debris. Avoid all water contact.' }
+    else if (flow > 2000) { flowLabel = 'Dangerous';        flowColor = '#f97316'; flowDesc = 'Very swift, powerful currents. Stay completely away from the main channel.' }
+    else if (flow > 500)  { flowLabel = 'Fast';             flowColor = '#f59e0b'; flowDesc = 'Swift currents. Hazardous for swimmers and casual tubing.' }
+    else if (flow > 100)  { flowLabel = 'Normal';           flowColor = '#10b981'; flowDesc = 'Typical recreational conditions moving at a manageable pace.' }
+    else                  { flowLabel = 'Low';              flowColor = '#60a5fa'; flowDesc = 'Slow-moving water. Generally safe for casual recreation.' }
   }
+
+  const rateColor = r => r > 0.15 ? 'var(--alert-orange)' : r < -0.08 ? 'var(--alert-green)' : '#94a3b8'
 
   return (
     <div className="gauge-detail-container">
-      <Link to="/" style={{ color: '#60a5fa', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 24 }}>
+      <Link to="/" className="back-link">
         <ArrowLeft size={16} /> Back to Dashboard
       </Link>
-      
+
+      {/* Header Panel */}
       <div className="glass-panel" style={{ marginBottom: 24 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 24 }}>
+        {isStale && <div className="stale-banner">Data may be stale — last reading was over 15 minutes ago.</div>}
+
+        <div className="detail-header-row">
           <div>
-            <h1 style={{ fontSize: '2rem', marginBottom: 8 }}>{gaugeConfig.name}</h1>
-            <div className={`alert-badge ${alertClass}`} style={{ marginBottom: 16 }}>
-              <AlertTriangle size={16} /> {alertLabel}
+            <h1 className="detail-title">{gaugeConfig.name}</h1>
+            <div className={`alert-badge ${alertClass}`} style={{ marginBottom: 10 }}>
+              <AlertTriangle size={14} /> {alertLabel}
             </div>
-            <div style={{ color: '#94a3b8' }}>
-              Lat: {gaugeConfig.lat} | Lng: {gaugeConfig.lng}
+            <div style={{ color: '#64748b', fontSize: '0.78rem' }}>
+              USGS #{gaugeConfig.id} &nbsp;·&nbsp; {gaugeConfig.lat}°N, {Math.abs(gaugeConfig.lng)}°W
             </div>
           </div>
-          
-          <div style={{ display: 'flex', gap: 32 }}>
+
+          <div className="detail-metrics-row">
             <div className="metric">
               <div className="metric-label">Current Level</div>
               <div><span className="metric-value">{height.toFixed(2)}</span><span className="metric-unit"> ft</span></div>
             </div>
             <div className="metric">
               <div className="metric-label">Flow Rate</div>
-              <div><span className="metric-value">{d.flow ? d.flow.toLocaleString() : '—'}</span><span className="metric-unit"> cfs</span></div>
+              <div>
+                <span className="metric-value">{d.flow != null ? d.flow.toLocaleString() : '—'}</span>
+                <span className="metric-unit"> cfs</span>
+              </div>
             </div>
-          </div>
-        </div>
-      </div>
-      
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 24, alignItems: 'stretch' }}>
-        
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-          {/* AI Predictor Panel */}
-          <div className="glass-panel" style={{ flex: 1, borderLeft: `4px solid ${aiColor}` }}>
-            <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: '#f8fafc' }}>
-              <Cpu size={20} color={aiColor} />
-              AI Surge Predictor (Next 24h)
-            </h3>
-            
-            {loadingForecast ? (
-              <div style={{ color: '#94a3b8' }}>Gathering meteorological data...</div>
-            ) : (
-              <>
-                <p style={{ fontSize: '1.1rem', lineHeight: 1.6, color: '#e2e8f0', marginBottom: 24 }}>
-                  {aiMessage}
-                </p>
-                <div style={{ display: 'flex', gap: 24, background: 'rgba(0,0,0,0.2)', padding: 16, borderRadius: 8 }}>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase' }}>Forecasted Rain</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>{forecast?.totalInches?.toFixed(2) || '0.00'} in</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase' }}>Max Intensity</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>{forecast?.maxHourlyInches?.toFixed(2) || '0.00'} in/hr</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase' }}>1hr Rise Rate</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>{d.rates?.rise60m?.toFixed(2) || '0.00'} ft</div>
-                  </div>
+            <div className="metric">
+              <div className="metric-label">1hr Change</div>
+              <div>
+                <span className="metric-value" style={{ color: rateColor(rate60) }}>
+                  {rate60 >= 0 ? '+' : ''}{rate60.toFixed(2)}
+                </span>
+                <span className="metric-unit"> ft/hr</span>
+              </div>
+            </div>
+            {floodStage && (
+              <div className="metric">
+                <div className="metric-label">To Flood</div>
+                <div>
+                  <span
+                    className="metric-value"
+                    style={{ color: floodPct > 85 ? 'var(--alert-red)' : floodPct > 65 ? 'var(--alert-orange)' : 'var(--text-main)' }}
+                  >
+                    {Math.max(0, floodStage - height).toFixed(2)}
+                  </span>
+                  <span className="metric-unit"> ft</span>
                 </div>
-              </>
-            )}
-          </div>
-          <div className="glass-panel" style={{ flex: 1, borderLeft: `4px solid ${flowColor}`, marginTop: 24 }}>
-            <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, color: '#f8fafc' }}>
-              <Activity size={20} color={flowColor} />
-              Flow Assessment
-            </h3>
-            <div style={{ fontSize: '1.25rem', fontWeight: 700, color: flowColor, marginBottom: 8 }}>
-              {flow.toLocaleString()} cfs
-            </div>
-            <p style={{ fontSize: '1rem', lineHeight: 1.5, color: '#e2e8f0' }}>
-              {flowMessage}
-            </p>
-          </div>
-          
-          <div className="glass-panel" style={{ marginTop: 24 }}>
-            <h3 style={{ marginBottom: 16, color: '#f8fafc' }}>Past 2 Hours History</h3>
-            <Sparkline data={historyHeights} color={`var(--alert-${alertClass.toLowerCase()})`} height={100} width={800} />
-            <div style={{ marginTop: 16, textAlign: 'right', fontSize: '0.875rem', color: '#94a3b8' }}>
-              Last Reading: {formatCDT(d.time)}
-            </div>
-          </div>
-        </div>
-
-        {/* Illuminated Flood Stage Meter */}
-        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-          <h3 style={{ marginBottom: 24, textAlign: 'center' }}>Flood Stage Monitor</h3>
-          
-          <div style={{ position: 'relative', height: 300, width: 60, background: 'rgba(0,0,0,0.3)', borderRadius: 30, border: '1px solid rgba(255,255,255,0.1)', overflow: 'hidden' }}>
-            {/* Water Fill */}
-            <div style={{ 
-              position: 'absolute', 
-              bottom: 0, 
-              left: 0, 
-              width: '100%', 
-              height: `${fillPercent}%`, 
-              background: `var(--alert-${alertClass.toLowerCase()})`,
-              transition: 'height 1s ease-in-out, background 0.5s',
-              boxShadow: `0 0 20px var(--alert-${alertClass.toLowerCase()})`
-            }}></div>
-            
-            {/* Flood Stage Line */}
-            {gaugeConfig.floodStageFt && (
-              <div style={{
-                position: 'absolute',
-                bottom: `${floodLinePercent}%`,
-                left: -10,
-                width: 80,
-                borderBottom: '2px dashed #ef4444',
-                zIndex: 10
-              }}>
-                <div style={{ position: 'absolute', right: -50, top: -8, color: '#ef4444', fontSize: '0.75rem', fontWeight: 'bold' }}>FLOOD</div>
               </div>
             )}
           </div>
-          
-          {gaugeConfig.floodStageFt && (
-            <div style={{ marginTop: 12, padding: '8px 16px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: 8, color: '#fca5a5', fontSize: '0.875rem', fontWeight: 600 }}>
-              {Math.max(0, gaugeConfig.floodStageFt - height).toFixed(2)} ft until Flood Stage
+        </div>
+
+        {/* Rise rate bar */}
+        <div className="rate-bar">
+          {[['5 min', rate5], ['15 min', rate15], ['60 min', rate60]].map(([label, r]) => (
+            <div key={label} className="rate-chip">
+              <span className="rate-chip-label">{label}</span>
+              <span style={{ fontWeight: 700, color: rateColor(r) }}>
+                {r >= 0 ? '+' : ''}{r.toFixed(2)} ft
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Trend Chart */}
+      <div className="glass-panel" style={{ marginBottom: 24 }}>
+        <div className="chart-header">
+          <h3 style={{ margin: 0, color: '#f8fafc', fontSize: '1rem' }}>
+            48-Hour Level History + 6-Hour Projection
+          </h3>
+          {predPeak !== null && (
+            <div className="chart-summary">
+              <span>
+                Projected peak: <strong style={{ color: floodStage && predPeak > floodStage ? '#ef4444' : '#f8fafc' }}>
+                  {predPeak.toFixed(2)}'
+                </strong>
+              </span>
+              <span>In 6hr: <strong style={{ color: '#f8fafc' }}>{predIn6h?.toFixed(2)}'</strong></span>
             </div>
           )}
+        </div>
 
-          <div style={{ marginTop: 24, textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: 700, color: `var(--alert-${alertClass.toLowerCase()})` }}>
-              {height.toFixed(1)}'
-            </div>
-            <div style={{ color: '#94a3b8', fontSize: '0.875rem' }}>
-              {gaugeConfig.floodStageFt ? `Flood Stage: ${gaugeConfig.floodStageFt}'` : 'Flood Stage Unknown'}
-            </div>
+        <TrendChart
+          history={d.history || []}
+          predictions={predictions}
+          floodStageFt={floodStage}
+          alertClass={alertClass}
+          chartHeight={260}
+        />
+
+        <div className="chart-legend">
+          <span>─── Historical reading</span>
+          <span>╌ ╌ 6hr projection {forecast && !forecastError ? '(rain-adjusted)' : '(trend only)'}</span>
+          {floodStage && <span style={{ color: '#ef4444' }}>- - - Flood stage</span>}
+        </div>
+      </div>
+
+      {/* Upstream surge incoming */}
+      {upstreamThreat && (
+        <div className="surge-banner surge-banner--red" style={{ marginBottom: 24 }}>
+          <ArrowUp size={18} color="#f87171" style={{ flexShrink: 0 }} />
+          <div>
+            <div className="surge-banner-title">Upstream Surge Incoming</div>
+            <div className="surge-banner-body">{upstreamThreat.message}</div>
+            <Link to={`/gauge/${upstreamThreat.sourceGaugeId}`} className="surge-link">
+              ← View {upstreamThreat.sourceName}
+            </Link>
           </div>
         </div>
-        
+      )}
+
+      {/* This gauge is warning downstream */}
+      {downstreamWarning && (
+        <div className="surge-banner surge-banner--orange" style={{ marginBottom: 24 }}>
+          <ArrowDown size={18} color="#fb923c" style={{ flexShrink: 0 }} />
+          <div>
+            <div className="surge-banner-title">Downstream Surge Warning Issued</div>
+            <div className="surge-banner-body">{downstreamWarning.message}</div>
+            <Link to={`/gauge/${downstreamWarning.downstreamGaugeId}`} className="surge-link">
+              Monitor {downstreamWarning.downstreamName} →
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* Analysis grid */}
+      <div className="gauge-detail-grid">
+
+        {/* Left column */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+          {/* AI Predictor */}
+          <div className="glass-panel" style={{ borderLeft: `4px solid ${aiColor}` }}>
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: '#f8fafc', fontSize: '1rem' }}>
+              <Cpu size={18} color={aiColor} />
+              AI Surge Predictor — Next 24h
+            </h3>
+
+            {loadingForecast ? (
+              <div style={{ color: '#94a3b8', fontSize: '0.9rem' }}>Gathering meteorological data…</div>
+            ) : (
+              <>
+                <p style={{ fontSize: '0.95rem', lineHeight: 1.65, color: '#e2e8f0', marginBottom: forecastError ? 0 : 20 }}>
+                  {aiMessage}
+                </p>
+                {!forecastError && forecast && (
+                  <div className="ai-stats-row">
+                    <div className="ai-stat">
+                      <div className="ai-stat-label">Forecasted Rain</div>
+                      <div className="ai-stat-value">{forecast.totalInches.toFixed(2)}"</div>
+                    </div>
+                    <div className="ai-stat">
+                      <div className="ai-stat-label">Max Intensity</div>
+                      <div className="ai-stat-value">{forecast.maxHourlyInches.toFixed(2)}" /hr</div>
+                    </div>
+                    <div className="ai-stat">
+                      <div className="ai-stat-label">60-min Rise</div>
+                      <div className="ai-stat-value">{rate60 >= 0 ? '+' : ''}{rate60.toFixed(2)} ft</div>
+                    </div>
+                    <div className="ai-stat">
+                      <div className="ai-stat-label">6hr Proj. Peak</div>
+                      <div
+                        className="ai-stat-value"
+                        style={{ color: predPeak && floodStage && predPeak > floodStage ? '#ef4444' : '#f8fafc' }}
+                      >
+                        {predPeak != null ? predPeak.toFixed(2) + "'" : '—'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Flow Assessment */}
+          <div className="glass-panel" style={{ borderLeft: `4px solid ${flowColor}` }}>
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, color: '#f8fafc', fontSize: '1rem' }}>
+              <Activity size={18} color={flowColor} />
+              Flow Assessment
+            </h3>
+            <div style={{ fontSize: '1.5rem', fontWeight: 800, color: flowColor, marginBottom: 4 }}>{flowLabel}</div>
+            <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: 10 }}>{flow.toLocaleString()} cfs</div>
+            <p style={{ fontSize: '0.88rem', lineHeight: 1.6, color: '#e2e8f0' }}>{flowDesc}</p>
+          </div>
+        </div>
+
+        {/* Right column — Flood Stage Meter */}
+        <div className="glass-panel flood-meter-panel">
+          <h3 style={{ textAlign: 'center', color: '#f8fafc', margin: '0 0 20px', fontSize: '1rem' }}>
+            Flood Stage Monitor
+          </h3>
+
+          <div className="thermometer-wrap">
+            <div className="thermometer">
+              {/* Water fill */}
+              <div
+                className="thermometer-fill"
+                style={{
+                  height: `${fillPercent}%`,
+                  background: `var(--alert-${alertClass.toLowerCase()})`,
+                  boxShadow: `0 0 28px var(--alert-${alertClass.toLowerCase()})`
+                }}
+              />
+              {/* Flood stage marker line */}
+              {floodLinePercent !== null && (
+                <div className="flood-marker" style={{ bottom: `${floodLinePercent}%` }}>
+                  <div className="flood-marker-label">FLOOD</div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ textAlign: 'center', marginTop: 16 }}>
+            <div style={{ fontSize: '2.4rem', fontWeight: 800, color: `var(--alert-${alertClass.toLowerCase()})`, lineHeight: 1 }}>
+              {height.toFixed(1)}'
+            </div>
+            {floodStage ? (
+              <>
+                <div style={{ color: '#64748b', fontSize: '0.8rem', margin: '6px 0 10px' }}>
+                  Flood Stage: {floodStage}'
+                </div>
+                <div className="progress-bar-track" style={{ width: 150, margin: '0 auto 6px' }}>
+                  <div
+                    className="progress-bar-fill"
+                    style={{
+                      width: `${Math.min(floodPct, 100)}%`,
+                      background: floodPct > 90
+                        ? 'var(--alert-red)'
+                        : floodPct > 65
+                          ? 'var(--alert-orange)'
+                          : 'var(--alert-green)'
+                    }}
+                  />
+                </div>
+                <div style={{ fontSize: '0.78rem', color: floodPct > 80 ? '#fca5a5' : '#64748b', marginBottom: 10 }}>
+                  {floodPct.toFixed(0)}% of flood stage
+                </div>
+                <div className="flood-countdown">
+                  {Math.max(0, floodStage - height).toFixed(2)} ft until flood
+                </div>
+              </>
+            ) : (
+              <div style={{ color: '#475569', fontSize: '0.8rem', marginTop: 8 }}>Flood stage not defined</div>
+            )}
+          </div>
+
+          {/* Rate summary */}
+          <div className="rate-summary">
+            <div className="rate-summary-title">Rise Rates</div>
+            {[['5 min', rate5], ['15 min', rate15], ['60 min', rate60]].map(([label, r]) => (
+              <div key={label} className="rate-summary-row">
+                <span style={{ color: '#64748b', fontSize: '0.78rem' }}>{label}</span>
+                <span style={{ fontWeight: 700, fontSize: '0.78rem', color: rateColor(r) }}>
+                  {r >= 0 ? '+' : ''}{r.toFixed(2)} ft
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 20, textAlign: 'center', fontSize: '0.72rem', color: '#334155' }}>
+        Last reading: {formatCDT(d.time)} · Auto-refreshes every 60s
       </div>
     </div>
   )
