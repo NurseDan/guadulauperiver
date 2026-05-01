@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
+import { saveReading, pruneReadings } from './lib/database'
 import { Activity, AlertTriangle, Clock, WifiOff } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
@@ -16,6 +17,8 @@ export default function App() {
   const isFirstFetch = useRef(true)
 
   useEffect(() => {
+    // Prune readings older than 30 days once on startup
+    pruneReadings(30)
     fetchData()
     const i = setInterval(fetchData, 60000)
     return () => clearInterval(i)
@@ -35,10 +38,11 @@ export default function App() {
         const rates = calculateRates(d.history || [], d)
         const alert = getAlertLevel(rates)
 
-        processed[g.id] = {
-          ...d,
-          alert,
-          rates
+        processed[g.id] = { ...d, alert, rates }
+
+        // Persist the current reading to IndexedDB (fire-and-forget)
+        if (d.time) {
+          saveReading(g.id, { height: d.height, flow: d.flow, time: d.time })
         }
       }
 
@@ -46,7 +50,7 @@ export default function App() {
       setLastUpdate(new Date())
       setFetchError(false)
     } catch (err) {
-      console.error("Failed to fetch data:", err)
+      console.error('Failed to fetch data:', err)
       setFetchError(true)
     } finally {
       if (isFirstFetch.current) {
@@ -60,12 +64,9 @@ export default function App() {
     if (!dateStr) return '—'
     return new Date(dateStr).toLocaleString('en-US', {
       timeZone: 'America/Chicago',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-      timeZoneName: 'short'
+      month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+      hour12: true, timeZoneName: 'short'
     })
   }
 
@@ -87,7 +88,7 @@ export default function App() {
             </div>
             <div className="header-time" style={{ marginTop: '8px', fontWeight: '500' }}>
               <Clock size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
-              Dashboard Refreshed: {lastUpdate ? formatCDT(lastUpdate) : 'Loading...'}
+              Refreshed: {lastUpdate ? formatCDT(lastUpdate) : 'Loading…'}
             </div>
           </div>
         </header>
@@ -95,19 +96,25 @@ export default function App() {
         {fetchError && (
           <div className="error-banner" role="alert">
             <WifiOff size={16} />
-            Unable to reach USGS data servers. Displaying last known readings.
+            Unable to reach USGS servers. Displaying last known readings.
           </div>
         )}
 
         {loading ? (
           <div className="loading-screen">
             <div className="loading-spinner" aria-label="Loading gauge data" />
-            <p>Connecting to USGS gauges&hellip;</p>
+            <p>Connecting to USGS gauges…</p>
           </div>
         ) : (
           <Routes>
-            <Route path="/" element={<Dashboard data={data} formatCDT={formatCDT} highestAlert={highestAlert} lastUpdate={lastUpdate} />} />
-            <Route path="/gauge/:id" element={<GaugeDetail data={data} formatCDT={formatCDT} />} />
+            <Route
+              path="/"
+              element={<Dashboard data={data} formatCDT={formatCDT} highestAlert={highestAlert} lastUpdate={lastUpdate} />}
+            />
+            <Route
+              path="/gauge/:id"
+              element={<GaugeDetail data={data} formatCDT={formatCDT} />}
+            />
           </Routes>
         )}
       </div>

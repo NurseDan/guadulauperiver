@@ -295,6 +295,16 @@ body {
   color: #475569;
 }
 
+/* ── River Chart ── */
+.chart-section-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
 /* ── Trend Chart Panel ── */
 .chart-header {
   display: flex;

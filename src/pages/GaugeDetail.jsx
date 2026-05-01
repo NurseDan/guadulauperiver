@@ -1,11 +1,12 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { GAUGES } from '../config/gauges'
 import { fetchPrecipitationForecast } from '../lib/weatherApi'
+import { getReadings } from '../lib/database'
 import { ALERT_LEVELS } from '../lib/alertEngine'
 import { detectSurges, getDownstreamRisk } from '../lib/surgeEngine'
 import { projectTrend, rainAdjustPredictions } from '../lib/predictionEngine'
-import TrendChart from '../components/TrendChart'
+import RiverChart, { buildChartData } from '../components/RiverChart'
 import { ArrowLeft, AlertTriangle, Activity, Cpu, ArrowDown, ArrowUp } from 'lucide-react'
 
 export default function GaugeDetail({ data, formatCDT }) {
@@ -16,9 +17,15 @@ export default function GaugeDetail({ data, formatCDT }) {
   const [forecast, setForecast] = useState(null)
   const [loadingForecast, setLoadingForecast] = useState(true)
   const [forecastError, setForecastError] = useState(false)
-  const [predictions, setPredictions] = useState([])
+  const [dbHistory, setDbHistory] = useState([])
 
-  // Fetch weather forecast when gauge changes
+  // Load from IndexedDB when gauge changes
+  useEffect(() => {
+    if (!id) return
+    getReadings(id, 7).then(rows => setDbHistory(rows))
+  }, [id])
+
+  // Fetch weather (past 48h + forecast 24h) when gauge changes
   useEffect(() => {
     if (!gaugeConfig) return
     setLoadingForecast(true)
@@ -30,12 +37,26 @@ export default function GaugeDetail({ data, formatCDT }) {
     })
   }, [gaugeConfig?.id])
 
-  // Recompute trend projection whenever data or forecast updates
-  useEffect(() => {
-    if (!d?.history?.length) return
-    const base = projectTrend(d.history, 6)
-    setPredictions(forecast ? rainAdjustPredictions(base, forecast) : base)
-  }, [d?.time, forecast])
+  // Merge DB rows with current USGS 48h history (deduped by time string)
+  const mergedHistory = useMemo(() => {
+    const map = new Map()
+    for (const r of dbHistory) map.set(r.time, r)
+    for (const r of (d?.history || [])) map.set(r.time, { ...r, gaugeId: id })
+    return Array.from(map.values()).sort((a, b) => (a.time < b.time ? -1 : 1))
+  }, [dbHistory, d?.time])
+
+  // Compute trend projection whenever history or forecast changes
+  const predictions = useMemo(() => {
+    if (!mergedHistory.length) return []
+    const base = projectTrend(mergedHistory, 6)
+    return forecast ? rainAdjustPredictions(base, forecast) : base
+  }, [mergedHistory, forecast])
+
+  // Build the unified chart data array
+  const chartData = useMemo(
+    () => buildChartData(mergedHistory, predictions, forecast?.hourly || []),
+    [mergedHistory, predictions, forecast]
+  )
 
   if (!gaugeConfig || !d) {
     return (
@@ -57,21 +78,27 @@ export default function GaugeDetail({ data, formatCDT }) {
   const rate15 = d.rates?.rise15m ?? 0
   const rate60 = d.rates?.rise60m ?? 0
 
-  // Surge / downstream risk
+  // Surge events
   const surgeEvents = detectSurges(data)
-  const upstreamThreat = getDownstreamRisk(id, surgeEvents)       // this gauge is receiving a surge
-  const downstreamWarning = surgeEvents.find(e => e.sourceGaugeId === id)  // this gauge is warning downstream
+  const upstreamThreat = getDownstreamRisk(id, surgeEvents)
+  const downstreamWarning = surgeEvents.find(e => e.sourceGaugeId === id)
 
-  // Flood stage meter geometry
+  // Flood meter geometry
   const maxVisual = Math.max(floodStage ? floodStage * 1.2 : 20, height * 1.1, 10)
   const fillPercent = Math.min((height / maxVisual) * 100, 100)
   const floodLinePercent = floodStage ? Math.min((floodStage / maxVisual) * 100, 100) : null
 
-  // Predicted values
+  // Prediction summary
   const predPeak = predictions.length ? Math.max(...predictions.map(p => p.height)) : null
   const predIn6h = predictions.at(-1)?.height ?? null
 
-  // AI Surge Predictor message
+  // DB coverage label
+  const oldestDb = dbHistory[0]?.time
+  const dbDays = oldestDb
+    ? Math.round((Date.now() - new Date(oldestDb).getTime()) / 86400000)
+    : 0
+
+  // AI message
   let aiMessage = forecastError
     ? 'Weather forecast unavailable. Monitor conditions manually.'
     : 'Analyzing conditions…'
@@ -81,19 +108,19 @@ export default function GaugeDetail({ data, formatCDT }) {
     const rain = forecast.totalInches || 0
     const rise = rate60
     if (rain > 1 && rise > 1) {
-      aiMessage = `CRITICAL: ${rain.toFixed(1)}" forecasted with a ${rise.toFixed(1)} ft/hr rise rate. Severe overbank risk is very high. Evacuate low-water crossings immediately.`
+      aiMessage = `CRITICAL: ${rain.toFixed(1)}" forecasted with a ${rise.toFixed(1)} ft/hr rise rate. Severe overbank risk. Evacuate low-water crossings immediately.`
       aiColor = '#ef4444'
     } else if (rain > 0.5 && rise > 0) {
-      aiMessage = `WARNING: ${rain.toFixed(1)}" incoming will accelerate the current ${rise.toFixed(2)} ft/hr rise. Expect surge conditions within 2–4 hours.`
+      aiMessage = `WARNING: ${rain.toFixed(1)}" incoming will accelerate the current ${rise.toFixed(2)} ft/hr rise. Expect surge within 2–4 hours.`
       aiColor = '#f97316'
     } else if (rain > 0.5) {
-      aiMessage = `WATCH: ${rain.toFixed(1)}" of precipitation forecasted. River is currently stable but expect delayed rises as upstream runoff accumulates.`
+      aiMessage = `WATCH: ${rain.toFixed(1)}" of precipitation forecasted. River is stable but expect delayed rises as runoff accumulates.`
       aiColor = '#f59e0b'
     } else if (rise > 0.5) {
-      aiMessage = `WARNING: Rising at ${rise.toFixed(1)} ft/hr with no significant rain — likely upstream release or localized flash runoff. Monitor closely.`
+      aiMessage = `WARNING: Rising at ${rise.toFixed(1)} ft/hr with no significant rain — likely upstream release or flash runoff. Monitor closely.`
       aiColor = '#f97316'
     } else {
-      aiMessage = `STABLE: ${rain.toFixed(2)}" forecasted with no significant rise trend. No surge risk is anticipated in the next 6 hours.`
+      aiMessage = `STABLE: ${rain.toFixed(2)}" forecasted with no significant rise trend. No surge risk anticipated in the next 6 hours.`
       aiColor = '#10b981'
     }
   }
@@ -102,11 +129,11 @@ export default function GaugeDetail({ data, formatCDT }) {
   const flow = d.flow || 0
   let flowLabel = 'No Data', flowColor = '#94a3b8', flowDesc = 'Flow rate unavailable.'
   if (d.flow !== undefined) {
-    if (flow > 5000)      { flowLabel = 'Severe / Flood';  flowColor = '#ef4444'; flowDesc = 'Life-threatening currents and debris. Avoid all water contact.' }
-    else if (flow > 2000) { flowLabel = 'Dangerous';        flowColor = '#f97316'; flowDesc = 'Very swift, powerful currents. Stay completely away from the main channel.' }
-    else if (flow > 500)  { flowLabel = 'Fast';             flowColor = '#f59e0b'; flowDesc = 'Swift currents. Hazardous for swimmers and casual tubing.' }
-    else if (flow > 100)  { flowLabel = 'Normal';           flowColor = '#10b981'; flowDesc = 'Typical recreational conditions moving at a manageable pace.' }
-    else                  { flowLabel = 'Low';              flowColor = '#60a5fa'; flowDesc = 'Slow-moving water. Generally safe for casual recreation.' }
+    if (flow > 5000)      { flowLabel = 'Severe / Flood'; flowColor = '#ef4444'; flowDesc = 'Life-threatening currents. Avoid all water contact.' }
+    else if (flow > 2000) { flowLabel = 'Dangerous';       flowColor = '#f97316'; flowDesc = 'Very swift currents with debris. Stay away from the main channel.' }
+    else if (flow > 500)  { flowLabel = 'Fast';            flowColor = '#f59e0b'; flowDesc = 'Swift currents. Hazardous for casual swimming and tubing.' }
+    else if (flow > 100)  { flowLabel = 'Normal';          flowColor = '#10b981'; flowDesc = 'Typical recreational conditions at a manageable pace.' }
+    else                  { flowLabel = 'Low';             flowColor = '#60a5fa'; flowDesc = 'Slow-moving water. Generally safe for casual recreation.' }
   }
 
   const rateColor = r => r > 0.15 ? 'var(--alert-orange)' : r < -0.08 ? 'var(--alert-green)' : '#94a3b8'
@@ -117,7 +144,7 @@ export default function GaugeDetail({ data, formatCDT }) {
         <ArrowLeft size={16} /> Back to Dashboard
       </Link>
 
-      {/* Header Panel */}
+      {/* ── Header ── */}
       <div className="glass-panel" style={{ marginBottom: 24 }}>
         {isStale && <div className="stale-banner">Data may be stale — last reading was over 15 minutes ago.</div>}
 
@@ -170,7 +197,6 @@ export default function GaugeDetail({ data, formatCDT }) {
           </div>
         </div>
 
-        {/* Rise rate bar */}
         <div className="rate-bar">
           {[['5 min', rate5], ['15 min', rate15], ['60 min', rate60]].map(([label, r]) => (
             <div key={label} className="rate-chip">
@@ -183,16 +209,24 @@ export default function GaugeDetail({ data, formatCDT }) {
         </div>
       </div>
 
-      {/* Trend Chart */}
+      {/* ── Interactive Chart ── */}
       <div className="glass-panel" style={{ marginBottom: 24 }}>
         <div className="chart-header">
-          <h3 style={{ margin: 0, color: '#f8fafc', fontSize: '1rem' }}>
-            48-Hour Level History + 6-Hour Projection
-          </h3>
+          <div>
+            <h3 style={{ margin: '0 0 4px', color: '#f8fafc', fontSize: '1rem' }}>
+              River Level, Flow &amp; Rainfall
+            </h3>
+            <div style={{ fontSize: '0.72rem', color: '#475569' }}>
+              {dbDays > 0
+                ? `Showing up to ${dbDays} day${dbDays !== 1 ? 's' : ''} of stored history + 6hr projection · drag the brush to zoom`
+                : 'Showing 48h USGS history + 6hr projection · drag the brush to zoom'}
+            </div>
+          </div>
           {predPeak !== null && (
             <div className="chart-summary">
               <span>
-                Projected peak: <strong style={{ color: floodStage && predPeak > floodStage ? '#ef4444' : '#f8fafc' }}>
+                Projected peak:&nbsp;
+                <strong style={{ color: floodStage && predPeak > floodStage ? '#ef4444' : '#f8fafc' }}>
                   {predPeak.toFixed(2)}'
                 </strong>
               </span>
@@ -201,22 +235,22 @@ export default function GaugeDetail({ data, formatCDT }) {
           )}
         </div>
 
-        <TrendChart
-          history={d.history || []}
-          predictions={predictions}
+        <RiverChart
+          chartData={chartData}
           floodStageFt={floodStage}
           alertClass={alertClass}
-          chartHeight={260}
         />
 
         <div className="chart-legend">
-          <span>─── Historical reading</span>
-          <span>╌ ╌ 6hr projection {forecast && !forecastError ? '(rain-adjusted)' : '(trend only)'}</span>
-          {floodStage && <span style={{ color: '#ef4444' }}>- - - Flood stage</span>}
+          <span style={{ color: '#94a3b8' }}>━ Historical level</span>
+          <span style={{ color: '#94a3b8' }}>╌ 6hr projection {forecast && !forecastError ? '(rain-adjusted)' : '(trend only)'}</span>
+          <span style={{ color: '#60a5fa' }}>━ Flow rate</span>
+          <span style={{ color: 'rgba(96,165,250,0.7)' }}>▐ Rainfall</span>
+          {floodStage && <span style={{ color: '#ef4444' }}>- - Flood stage</span>}
         </div>
       </div>
 
-      {/* Upstream surge incoming */}
+      {/* ── Surge banners ── */}
       {upstreamThreat && (
         <div className="surge-banner surge-banner--red" style={{ marginBottom: 24 }}>
           <ArrowUp size={18} color="#f87171" style={{ flexShrink: 0 }} />
@@ -230,7 +264,6 @@ export default function GaugeDetail({ data, formatCDT }) {
         </div>
       )}
 
-      {/* This gauge is warning downstream */}
       {downstreamWarning && (
         <div className="surge-banner surge-banner--orange" style={{ marginBottom: 24 }}>
           <ArrowDown size={18} color="#fb923c" style={{ flexShrink: 0 }} />
@@ -244,10 +277,9 @@ export default function GaugeDetail({ data, formatCDT }) {
         </div>
       )}
 
-      {/* Analysis grid */}
+      {/* ── Analysis grid ── */}
       <div className="gauge-detail-grid">
 
-        {/* Left column */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
           {/* AI Predictor */}
@@ -267,7 +299,7 @@ export default function GaugeDetail({ data, formatCDT }) {
                 {!forecastError && forecast && (
                   <div className="ai-stats-row">
                     <div className="ai-stat">
-                      <div className="ai-stat-label">Forecasted Rain</div>
+                      <div className="ai-stat-label">24h Rain</div>
                       <div className="ai-stat-value">{forecast.totalInches.toFixed(2)}"</div>
                     </div>
                     <div className="ai-stat">
@@ -279,7 +311,7 @@ export default function GaugeDetail({ data, formatCDT }) {
                       <div className="ai-stat-value">{rate60 >= 0 ? '+' : ''}{rate60.toFixed(2)} ft</div>
                     </div>
                     <div className="ai-stat">
-                      <div className="ai-stat-label">6hr Proj. Peak</div>
+                      <div className="ai-stat-label">Proj. Peak</div>
                       <div
                         className="ai-stat-value"
                         style={{ color: predPeak && floodStage && predPeak > floodStage ? '#ef4444' : '#f8fafc' }}
@@ -305,7 +337,7 @@ export default function GaugeDetail({ data, formatCDT }) {
           </div>
         </div>
 
-        {/* Right column — Flood Stage Meter */}
+        {/* Flood Stage Meter */}
         <div className="glass-panel flood-meter-panel">
           <h3 style={{ textAlign: 'center', color: '#f8fafc', margin: '0 0 20px', fontSize: '1rem' }}>
             Flood Stage Monitor
@@ -313,7 +345,6 @@ export default function GaugeDetail({ data, formatCDT }) {
 
           <div className="thermometer-wrap">
             <div className="thermometer">
-              {/* Water fill */}
               <div
                 className="thermometer-fill"
                 style={{
@@ -322,7 +353,6 @@ export default function GaugeDetail({ data, formatCDT }) {
                   boxShadow: `0 0 28px var(--alert-${alertClass.toLowerCase()})`
                 }}
               />
-              {/* Flood stage marker line */}
               {floodLinePercent !== null && (
                 <div className="flood-marker" style={{ bottom: `${floodLinePercent}%` }}>
                   <div className="flood-marker-label">FLOOD</div>
@@ -345,11 +375,7 @@ export default function GaugeDetail({ data, formatCDT }) {
                     className="progress-bar-fill"
                     style={{
                       width: `${Math.min(floodPct, 100)}%`,
-                      background: floodPct > 90
-                        ? 'var(--alert-red)'
-                        : floodPct > 65
-                          ? 'var(--alert-orange)'
-                          : 'var(--alert-green)'
+                      background: floodPct > 90 ? 'var(--alert-red)' : floodPct > 65 ? 'var(--alert-orange)' : 'var(--alert-green)'
                     }}
                   />
                 </div>
@@ -365,7 +391,6 @@ export default function GaugeDetail({ data, formatCDT }) {
             )}
           </div>
 
-          {/* Rate summary */}
           <div className="rate-summary">
             <div className="rate-summary-title">Rise Rates</div>
             {[['5 min', rate5], ['15 min', rate15], ['60 min', rate60]].map(([label, r]) => (
@@ -381,7 +406,8 @@ export default function GaugeDetail({ data, formatCDT }) {
       </div>
 
       <div style={{ marginTop: 20, textAlign: 'center', fontSize: '0.72rem', color: '#334155' }}>
-        Last reading: {formatCDT(d.time)} · Auto-refreshes every 60s
+        Last reading: {formatCDT(d.time)} · Auto-refreshes every 60s ·
+        {dbDays > 0 ? ` ${dbDays}d of local history stored` : ' Building local history…'}
       </div>
     </div>
   )
