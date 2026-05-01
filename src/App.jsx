@@ -11,51 +11,31 @@ import Dashboard from './pages/Dashboard'
 import GaugeDetail from './pages/GaugeDetail'
 import NWSAlertBanner from './components/NWSAlertBanner'
 
+function dataAge(isoTime) {
+  if (!isoTime) return null
+  const mins = Math.floor((Date.now() - new Date(isoTime).getTime()) / 60000)
+  if (mins < 1)  return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  return `${hrs}h ${mins % 60}m ago`
+}
+
 export default function App() {
-  const [data, setData] = useState({})
+  const [data, setData]           = useState({})
   const [lastUpdate, setLastUpdate] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading]     = useState(true)
   const [fetchError, setFetchError] = useState(false)
-  const [isStale, setIsStale] = useState(false)
+  const [isStale, setIsStale]     = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [nwsAlerts, setNwsAlerts] = useState([])
+
   const usgsResponded = useRef(false)
+  const fetchInFlight = useRef(false)
 
-  useEffect(() => {
-    pruneReadings(30)
-    loadCachedData()
-    fetchData()
-    fetchNWSAlerts().then(setNwsAlerts)
-    const i = setInterval(fetchData, 60000)
-    const j = setInterval(() => fetchNWSAlerts().then(setNwsAlerts), 5 * 60000)
-    return () => { clearInterval(i); clearInterval(j) }
-  }, [])
-
-  async function loadCachedData() {
-    const processed = {}
-    for (const g of GAUGES) {
-      const readings = await getReadings(g.id, 7)
-      if (!readings.length) continue
-      const latest = readings[readings.length - 1]
-      const rates = calculateRates(readings, latest)
-      const alert = getAlertLevel(rates)
-      processed[g.id] = {
-        height: latest.height,
-        flow: latest.flow,
-        time: latest.time,
-        history: readings,
-        alert,
-        rates
-      }
-    }
-    if (Object.keys(processed).length > 0 && !usgsResponded.current) {
-      setData(processed)
-      setIsStale(true)
-      setLoading(false)
-    }
-  }
-
-  async function fetchData() {
+  // ── Core data fetch ──────────────────────────────────────────
+  const doFetchData = useCallback(async () => {
+    if (fetchInFlight.current) return  // prevent overlapping calls
+    fetchInFlight.current = true
     try {
       const ids = GAUGES.map(g => g.id)
       const usgsData = await fetchUSGSGauges(ids)
@@ -67,9 +47,7 @@ export default function App() {
         const rates = calculateRates(d.history || [], d)
         const alert = getAlertLevel(rates)
         processed[g.id] = { ...d, alert, rates }
-        if (d.time) {
-          saveReading(g.id, { height: d.height, flow: d.flow, time: d.time })
-        }
+        if (d.time) saveReading(g.id, { height: d.height, flow: d.flow, time: d.time })
       }
 
       usgsResponded.current = true
@@ -78,27 +56,73 @@ export default function App() {
       setIsStale(false)
       setFetchError(false)
     } catch (err) {
-      console.error('Failed to fetch data:', err)
+      console.error('USGS fetch failed:', err)
       setFetchError(true)
     } finally {
+      fetchInFlight.current = false
       setLoading(false)
     }
-  }
+  }, [])
 
+  const doFetchAlerts = useCallback(async () => {
+    const alerts = await fetchNWSAlerts()
+    setNwsAlerts(alerts)
+  }, [])
+
+  // ── Load IndexedDB cache → render immediately while USGS loads ─
+  const loadCachedData = useCallback(async () => {
+    const processed = {}
+    for (const g of GAUGES) {
+      const readings = await getReadings(g.id, 7)
+      if (!readings.length) continue
+      const latest = readings[readings.length - 1]
+      const rates  = calculateRates(readings, latest)
+      const alert  = getAlertLevel(rates)
+      processed[g.id] = { height: latest.height, flow: latest.flow, time: latest.time, history: readings, alert, rates }
+    }
+    if (Object.keys(processed).length > 0 && !usgsResponded.current) {
+      setData(processed)
+      setIsStale(true)
+      setLoading(false)
+    }
+  }, [])
+
+  // ── Manual refresh ───────────────────────────────────────────
   const handleRefresh = useCallback(async () => {
     if (refreshing) return
     setRefreshing(true)
     try {
-      await Promise.all([
-        fetchData(),
-        fetchNWSAlerts().then(setNwsAlerts)
-      ])
+      await Promise.all([doFetchData(), doFetchAlerts()])
     } finally {
       setRefreshing(false)
     }
-  }, [refreshing])
+  }, [refreshing, doFetchData, doFetchAlerts])
 
-  const formatCDT = (dateStr) => {
+  // ── Startup + polling ────────────────────────────────────────
+  useEffect(() => {
+    pruneReadings(30)
+    loadCachedData()
+    doFetchData()
+    doFetchAlerts()
+
+    const dataInterval  = setInterval(doFetchData,   60_000)
+    const alertInterval = setInterval(doFetchAlerts, 5 * 60_000)
+
+    // Re-fetch when user returns to the tab (browser throttles timers in background)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') doFetchData()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      clearInterval(dataInterval)
+      clearInterval(alertInterval)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [doFetchData, doFetchAlerts, loadCachedData])
+
+  // ── Formatting ───────────────────────────────────────────────
+  const formatCDT = useCallback((dateStr) => {
     if (!dateStr) return '—'
     return new Date(dateStr).toLocaleString('en-US', {
       timeZone: 'America/Chicago',
@@ -106,10 +130,16 @@ export default function App() {
       hour: 'numeric', minute: '2-digit',
       hour12: true, timeZoneName: 'short'
     })
-  }
+  }, [])
 
   const alertsArray = Object.values(data).map(d => d.alert)
   const highestAlert = alertsArray.length > 0 ? getHighestAlert(alertsArray) : 'GREEN'
+
+  // Most recent USGS reading time across all gauges
+  const newestReading = Object.values(data).reduce((best, d) => {
+    if (!d.time) return best
+    return !best || d.time > best ? d.time : best
+  }, null)
 
   return (
     <BrowserRouter>
@@ -122,19 +152,14 @@ export default function App() {
           <div className="header-meta">
             <div className={`alert-badge ${highestAlert}`}>
               <AlertTriangle size={16} />
-              System Status: {ALERT_LEVELS[highestAlert]?.label || 'Normal'}
+              {ALERT_LEVELS[highestAlert]?.label || 'Normal'}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
               <div className="header-time">
                 <Clock size={13} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
-                {lastUpdate ? formatCDT(lastUpdate) : 'Loading…'}
+                {newestReading ? `Data: ${dataAge(newestReading)}` : 'Loading…'}
               </div>
-              <button
-                onClick={handleRefresh}
-                disabled={refreshing}
-                className="refresh-btn"
-                title="Refresh now"
-              >
+              <button onClick={handleRefresh} disabled={refreshing} className="refresh-btn" title="Refresh now">
                 <RefreshCw size={13} className={refreshing ? 'spin' : ''} />
                 {refreshing ? 'Refreshing…' : 'Refresh'}
               </button>
@@ -152,7 +177,7 @@ export default function App() {
         {isStale && !fetchError && (
           <div className="stale-banner" role="status">
             <Database size={14} />
-            Showing cached readings — live data loading…
+            Showing cached readings — fetching live data…
           </div>
         )}
 
@@ -165,31 +190,26 @@ export default function App() {
           </div>
         ) : (
           <Routes>
-            <Route
-              path="/"
-              element={
-                <Dashboard
-                  data={data}
-                  formatCDT={formatCDT}
-                  highestAlert={highestAlert}
-                  lastUpdate={lastUpdate}
-                  onRefresh={handleRefresh}
-                  refreshing={refreshing}
-                />
-              }
-            />
-            <Route
-              path="/gauge/:id"
-              element={
-                <GaugeDetail
-                  data={data}
-                  formatCDT={formatCDT}
-                  nwsAlerts={nwsAlerts}
-                  onRefresh={handleRefresh}
-                  refreshing={refreshing}
-                />
-              }
-            />
+            <Route path="/" element={
+              <Dashboard
+                data={data}
+                formatCDT={formatCDT}
+                dataAge={dataAge}
+                highestAlert={highestAlert}
+                onRefresh={handleRefresh}
+                refreshing={refreshing}
+              />
+            } />
+            <Route path="/gauge/:id" element={
+              <GaugeDetail
+                data={data}
+                formatCDT={formatCDT}
+                dataAge={dataAge}
+                nwsAlerts={nwsAlerts}
+                onRefresh={handleRefresh}
+                refreshing={refreshing}
+              />
+            } />
           </Routes>
         )}
       </div>

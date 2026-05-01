@@ -1,67 +1,80 @@
+const FIFTEEN_MIN_MS = 15 * 60 * 1000
+const snap15 = ts => Math.round(ts / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS
+
+async function attemptFetch(url, signal) {
+  const res = await fetch(url, { signal })
+  if (!res.ok) throw new Error(`USGS ${res.status}`)
+  return res.json()
+}
+
 export async function fetchUSGSGauges(ids) {
   const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&sites=${ids.join(',')}&parameterCd=00065,00060&period=PT48H`
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 15000)
+  const timeout = setTimeout(() => controller.abort(), 30000)
 
   let json
   try {
-    const res = await fetch(url, { signal: controller.signal })
-    if (!res.ok) throw new Error(`USGS responded with ${res.status}`)
-    json = await res.json()
+    json = await attemptFetch(url, controller.signal)
   } finally {
     clearTimeout(timeout)
   }
 
   if (!json?.value?.timeSeries) return {}
 
-  // Collect height and flow values separately, keyed by site then timestamp
-  const heightBySite = {}
-  const flowBySite = {}
+  // Collect readings keyed by 15-min bucket so height and flow align
+  // regardless of exact timestamp offsets between the two USGS parameter streams.
+  const heightBySite = {}   // site → bucket_ms → { value, isoTime }
+  const flowBySite   = {}   // site → bucket_ms → cfs value
   const latestBySite = {}
 
-  json.value.timeSeries.forEach(ts => {
-    const site = ts.sourceInfo.siteCode[0].value
+  for (const ts of json.value.timeSeries) {
+    const site  = ts.sourceInfo.siteCode[0].value
     const param = ts.variable.variableCode[0].value
-    const values = ts.values[0].value.filter(v => Number(v.value) > -900000)
-    if (!values.length) return
+    const vals  = ts.values[0].value.filter(v => Number(v.value) > -900000)
+    if (!vals.length) continue
 
-    const latest = values[values.length - 1]
+    const latest = vals[vals.length - 1]
 
     if (param === '00065') {
       heightBySite[site] = {}
-      values.forEach(v => { heightBySite[site][v.dateTime] = Number(v.value) })
-      if (!latestBySite[site]) latestBySite[site] = {}
-      latestBySite[site].height = Number(latest.value)
-      latestBySite[site].time = latest.dateTime
+      for (const v of vals) {
+        const bucket = snap15(new Date(v.dateTime).getTime())
+        heightBySite[site][bucket] = { value: Number(v.value), isoTime: v.dateTime }
+      }
+      latestBySite[site] = {
+        ...latestBySite[site],
+        height: Number(latest.value),
+        time: latest.dateTime
+      }
     }
 
     if (param === '00060') {
       flowBySite[site] = {}
-      values.forEach(v => { flowBySite[site][v.dateTime] = Number(v.value) })
-      if (!latestBySite[site]) latestBySite[site] = {}
-      latestBySite[site].flow = Number(latest.value)
+      for (const v of vals) {
+        const bucket = snap15(new Date(v.dateTime).getTime())
+        flowBySite[site][bucket] = Number(v.value)
+      }
+      latestBySite[site] = {
+        ...latestBySite[site],
+        flow: Number(latest.value)
+      }
     }
-  })
+  }
 
-  // Build result with unified history (height + flow per timestamp)
   const result = {}
   for (const site of Object.keys(latestBySite)) {
     const heights = heightBySite[site] || {}
-    const flows = flowBySite[site] || {}
+    const flows   = flowBySite[site]   || {}
 
-    // All timestamps that have a height reading
-    const history = Object.keys(heights)
-      .sort()
-      .map(time => ({
-        time,
-        height: heights[time],
-        flow: flows[time] ?? null
+    const history = Object.entries(heights)
+      .sort(([a], [b]) => Number(a) - Number(b))
+      .map(([bucket, { value, isoTime }]) => ({
+        time:   isoTime,
+        height: value,
+        flow:   flows[Number(bucket)] ?? null
       }))
 
-    result[site] = {
-      ...latestBySite[site],
-      history
-    }
+    result[site] = { ...latestBySite[site], history }
   }
 
   return result

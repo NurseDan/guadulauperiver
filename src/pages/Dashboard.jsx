@@ -44,8 +44,8 @@ function RiverCorridor({ gauges }) {
         const d = gauges[g.id]
         const color = alertColor(d?.alert)
         const ht = d?.height
-        const rate = d?.rates?.rise60m ?? 0
-        const rateStr = rate > 0.05 ? `↑ +${rate.toFixed(1)}'` : rate < -0.05 ? `↓ ${rate.toFixed(1)}'` : '→ stable'
+        const rate = d?.rates?.rate1h ?? 0
+        const rateStr = rate > 0.2 ? `↑ +${rate.toFixed(1)} ft/hr` : rate < -0.15 ? `↓ ${rate.toFixed(1)} ft/hr` : '→ stable'
 
         return (
           <g key={g.id}>
@@ -71,10 +71,10 @@ function RiverCorridor({ gauges }) {
   )
 }
 
-export default function Dashboard({ data, formatCDT, onRefresh, refreshing }) {
+export default function Dashboard({ data, formatCDT, dataAge, onRefresh, refreshing }) {
   const gaugeList = GAUGES.map(g => ({ ...g, d: data[g.id] }))
-  const rising  = gaugeList.filter(g => (g.d?.rates?.rise60m ?? 0) > 0.1).length
-  const falling = gaugeList.filter(g => (g.d?.rates?.rise60m ?? 0) < -0.08).length
+  const rising  = gaugeList.filter(g => (g.d?.rates?.rate1h ?? 0) > 0.3).length
+  const falling = gaugeList.filter(g => (g.d?.rates?.rate1h ?? 0) < -0.2).length
   const stable  = gaugeList.length - rising - falling
   const totalFlow = gaugeList.reduce((sum, g) => sum + (g.d?.flow ?? 0), 0)
   const highestGauge = gaugeList.reduce((best, g) => {
@@ -136,8 +136,8 @@ export default function Dashboard({ data, formatCDT, onRefresh, refreshing }) {
           const d = data[g.id]
           const alertClass = d?.alert || 'GREEN'
           const alertLabel = ALERT_LEVELS[alertClass]?.label || 'Normal'
-          const rate60 = d?.rates?.rise60m ?? 0
-          const rate15 = d?.rates?.rise15m ?? 0
+          const rate1h  = d?.rates?.rate1h  ?? 0
+          const rise15m = d?.rates?.rise15m ?? 0
           const floodPct = g.floodStageFt && d?.height != null
             ? Math.min((d.height / g.floodStageFt) * 100, 110)
             : null
@@ -146,9 +146,9 @@ export default function Dashboard({ data, formatCDT, onRefresh, refreshing }) {
             ? d.history.map(h => h.height).filter(h => typeof h === 'number' && !isNaN(h))
             : []
 
-          const rateColor = rate60 > 0.3 ? 'var(--alert-orange)' : rate60 < -0.1 ? 'var(--alert-green)' : 'var(--text-main)'
-          const TrendIcon = rate60 > 0.1 ? TrendingUp : rate60 < -0.08 ? TrendingDown : Minus
-          const trendColor = rate60 > 0.1 ? 'var(--alert-orange)' : rate60 < -0.08 ? 'var(--alert-green)' : '#64748b'
+          const rateColor = rate1h > 0.5 ? 'var(--alert-orange)' : rate1h > 0.15 ? 'var(--alert-yellow)' : rate1h < -0.3 ? 'var(--alert-green)' : 'var(--text-main)'
+          const TrendIcon = rate1h > 0.3 ? TrendingUp : rate1h < -0.3 ? TrendingDown : Minus
+          const trendColor = rate1h > 0.3 ? 'var(--alert-orange)' : rate1h < -0.3 ? 'var(--alert-green)' : '#64748b'
 
           return (
             <Link to={`/gauge/${g.id}`} key={g.id} style={{ textDecoration: 'none', color: 'inherit' }}>
@@ -177,20 +177,20 @@ export default function Dashboard({ data, formatCDT, onRefresh, refreshing }) {
                     </div>
                   </div>
                   <div className="metric">
-                    <div className="metric-label">1hr Δ</div>
+                    <div className="metric-label">Rise Rate</div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                       <TrendIcon size={14} color={trendColor} />
                       <span className="metric-value" style={{ fontSize: '1.5rem', color: rateColor }}>
-                        {rate60 >= 0 ? '+' : ''}{rate60.toFixed(2)}
+                        {rate1h >= 0 ? '+' : ''}{rate1h.toFixed(2)}
                       </span>
-                      <span className="metric-unit"> ft</span>
+                      <span className="metric-unit"> ft/hr</span>
                     </div>
                   </div>
                   <div className="metric">
-                    <div className="metric-label">15min Δ</div>
+                    <div className="metric-label">15 min Δ</div>
                     <div>
-                      <span className="metric-value" style={{ fontSize: '1.2rem', color: rate15 > 0.1 ? 'var(--alert-orange)' : rate15 < -0.05 ? 'var(--alert-green)' : 'var(--text-main)' }}>
-                        {rate15 >= 0 ? '+' : ''}{rate15.toFixed(2)}
+                      <span className="metric-value" style={{ fontSize: '1.2rem', color: rise15m > 0.2 ? 'var(--alert-orange)' : rise15m < -0.1 ? 'var(--alert-green)' : 'var(--text-main)' }}>
+                        {rise15m >= 0 ? '+' : ''}{rise15m.toFixed(2)}
                       </span>
                       <span className="metric-unit"> ft</span>
                     </div>
@@ -228,7 +228,7 @@ export default function Dashboard({ data, formatCDT, onRefresh, refreshing }) {
 
                 <div className="gauge-footer">
                   <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
-                    Updated: {d?.time ? formatCDT(d.time) : '—'}
+                    {d?.time ? dataAge(d.time) : '—'}
                   </div>
                   <div style={{ color: '#60a5fa', fontWeight: '600', fontSize: '0.75rem' }}>View Details →</div>
                 </div>
