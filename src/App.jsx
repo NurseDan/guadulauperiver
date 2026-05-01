@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { SpeedInsights } from '@vercel/speed-insights/react'
 import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
@@ -87,6 +88,7 @@ export default function App() {
           <Route path="/gauge/:id" element={<GaugeDetail data={data} formatCDT={formatCDT} />} />
         </Routes>
       </div>
+      <SpeedInsights />
     </BrowserRouter>
   )
 }
