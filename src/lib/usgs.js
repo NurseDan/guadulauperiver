@@ -1,5 +1,5 @@
 export async function fetchUSGSGauges(ids) {
-  const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&sites=${ids.join(',')}&parameterCd=00065,00060&period=PT2H`
+  const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&sites=${ids.join(',')}&parameterCd=00065,00060&period=PT48H`
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 15000)
 
