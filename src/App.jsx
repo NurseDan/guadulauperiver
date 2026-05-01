@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { Analytics } from '@vercel/analytics/react'
 import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
@@ -111,6 +112,7 @@ export default function App() {
           </Routes>
         )}
       </div>
+      <Analytics />
     </BrowserRouter>
   )
 }
