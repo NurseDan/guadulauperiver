@@ -13,14 +13,20 @@ export default function GaugeDetail({ data, formatCDT }) {
   
   const [forecast, setForecast] = useState(null)
   const [loadingForecast, setLoadingForecast] = useState(true)
+  const [forecastError, setForecastError] = useState(false)
 
   useEffect(() => {
     if (!gaugeConfig) return
-    
+
     async function loadForecast() {
       setLoadingForecast(true)
+      setForecastError(false)
       const res = await fetchPrecipitationForecast(gaugeConfig.lat, gaugeConfig.lng)
-      setForecast(res)
+      if (res === null) {
+        setForecastError(true)
+      } else {
+        setForecast(res)
+      }
       setLoadingForecast(false)
     }
     loadForecast()
@@ -45,11 +51,16 @@ export default function GaugeDetail({ data, formatCDT }) {
   const fillPercent = Math.min((height / maxVisual) * 100, 100)
   const floodLinePercent = Math.min((floodStage / maxVisual) * 100, 100)
 
+  // Stale data: warn if last reading is more than 15 minutes old
+  const isStale = d.time ? (Date.now() - new Date(d.time).getTime()) > 15 * 60 * 1000 : false
+
   // AI Surge Predictor Logic
-  let aiMessage = "Analyzing conditions..."
-  let aiColor = "#94a3b8"
-  
-  if (forecast && d.rates) {
+  let aiMessage = forecastError
+    ? "Weather forecast unavailable. Check local conditions manually."
+    : "Analyzing conditions..."
+  let aiColor = forecastError ? "#94a3b8" : "#94a3b8"
+
+  if (!forecastError && forecast && d.rates) {
     const riseRate = d.rates.rise60m || 0
     const rain = forecast.totalInches || 0
     
@@ -104,6 +115,11 @@ export default function GaugeDetail({ data, formatCDT }) {
       </Link>
       
       <div className="glass-panel" style={{ marginBottom: 24 }}>
+        {isStale && (
+          <div className="stale-banner" role="status">
+            Data may be stale — last reading was over 15 minutes ago.
+          </div>
+        )}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 24 }}>
           <div>
             <h1 style={{ fontSize: '2rem', marginBottom: 8 }}>{gaugeConfig.name}</h1>
@@ -128,7 +144,7 @@ export default function GaugeDetail({ data, formatCDT }) {
         </div>
       </div>
       
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 24, alignItems: 'stretch' }}>
+      <div className="gauge-detail-grid">
         
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
           {/* AI Predictor Panel */}
@@ -142,9 +158,10 @@ export default function GaugeDetail({ data, formatCDT }) {
               <div style={{ color: '#94a3b8' }}>Gathering meteorological data...</div>
             ) : (
               <>
-                <p style={{ fontSize: '1.1rem', lineHeight: 1.6, color: '#e2e8f0', marginBottom: 24 }}>
+                <p style={{ fontSize: '1.1rem', lineHeight: 1.6, color: '#e2e8f0', marginBottom: forecastError ? 0 : 24 }}>
                   {aiMessage}
                 </p>
+                {!forecastError && (
                 <div style={{ display: 'flex', gap: 24, background: 'rgba(0,0,0,0.2)', padding: 16, borderRadius: 8 }}>
                   <div>
                     <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase' }}>Forecasted Rain</div>
@@ -159,6 +176,7 @@ export default function GaugeDetail({ data, formatCDT }) {
                     <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>{d.rates?.rise60m?.toFixed(2) || '0.00'} ft</div>
                   </div>
                 </div>
+                )}
               </>
             )}
           </div>

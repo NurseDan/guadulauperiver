@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
-import { Activity, AlertTriangle, Clock } from 'lucide-react'
+import { Activity, AlertTriangle, Clock, WifiOff } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
 import GaugeDetail from './pages/GaugeDetail'
@@ -11,6 +11,9 @@ import GaugeDetail from './pages/GaugeDetail'
 export default function App() {
   const [data, setData] = useState({})
   const [lastUpdate, setLastUpdate] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(false)
+  const isFirstFetch = useRef(true)
 
   useEffect(() => {
     fetchData()
@@ -41,8 +44,15 @@ export default function App() {
 
       setData(processed)
       setLastUpdate(new Date())
+      setFetchError(false)
     } catch (err) {
       console.error("Failed to fetch data:", err)
+      setFetchError(true)
+    } finally {
+      if (isFirstFetch.current) {
+        isFirstFetch.current = false
+        setLoading(false)
+      }
     }
   }
 
@@ -72,7 +82,7 @@ export default function App() {
           </div>
           <div className="header-meta">
             <div className={`alert-badge ${highestAlert}`}>
-              <AlertTriangle size={16} /> 
+              <AlertTriangle size={16} />
               System Status: {ALERT_LEVELS[highestAlert]?.label || 'Normal'}
             </div>
             <div className="header-time" style={{ marginTop: '8px', fontWeight: '500' }}>
@@ -82,10 +92,24 @@ export default function App() {
           </div>
         </header>
 
-        <Routes>
-          <Route path="/" element={<Dashboard data={data} formatCDT={formatCDT} highestAlert={highestAlert} lastUpdate={lastUpdate} />} />
-          <Route path="/gauge/:id" element={<GaugeDetail data={data} formatCDT={formatCDT} />} />
-        </Routes>
+        {fetchError && (
+          <div className="error-banner" role="alert">
+            <WifiOff size={16} />
+            Unable to reach USGS data servers. Displaying last known readings.
+          </div>
+        )}
+
+        {loading ? (
+          <div className="loading-screen">
+            <div className="loading-spinner" aria-label="Loading gauge data" />
+            <p>Connecting to USGS gauges&hellip;</p>
+          </div>
+        ) : (
+          <Routes>
+            <Route path="/" element={<Dashboard data={data} formatCDT={formatCDT} highestAlert={highestAlert} lastUpdate={lastUpdate} />} />
+            <Route path="/gauge/:id" element={<GaugeDetail data={data} formatCDT={formatCDT} />} />
+          </Routes>
+        )}
       </div>
     </BrowserRouter>
   )
