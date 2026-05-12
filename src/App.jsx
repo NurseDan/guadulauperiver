@@ -3,12 +3,46 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { GAUGES } from './config/gauges'
 import { fetchUSGSGauges } from './lib/usgs'
 import { calculateRates, getAlertLevel, getHighestAlert, ALERT_LEVELS } from './lib/alertEngine'
-import { Activity, AlertTriangle, Clock, WifiOff } from 'lucide-react'
+import { Activity, AlertTriangle, Clock, WifiOff, LogOut } from 'lucide-react'
+import { AuthProvider, useAuth } from './context/AuthContext'
 
 import Dashboard from './pages/Dashboard'
 import GaugeDetail from './pages/GaugeDetail'
+import Landing from './pages/Landing'
 
 export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <AppRoutes />
+      </BrowserRouter>
+    </AuthProvider>
+  )
+}
+
+function AppRoutes() {
+  const { session } = useAuth()
+
+  if (session === undefined) {
+    return (
+      <div className="loading-screen" style={{ minHeight: '100vh' }}>
+        <div className="loading-spinner" aria-label="Loading" />
+      </div>
+    )
+  }
+
+  if (!session) {
+    return (
+      <Routes>
+        <Route path="*" element={<Landing />} />
+      </Routes>
+    )
+  }
+
+  return <AuthenticatedApp />
+}
+
+function AuthenticatedApp() {
   const [data, setData] = useState({})
   const [lastUpdate, setLastUpdate] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -72,8 +106,9 @@ export default function App() {
   const alertsArray = Object.values(data).map(d => d.alert)
   const highestAlert = alertsArray.length > 0 ? getHighestAlert(alertsArray) : 'GREEN'
 
+  const { signOut } = useAuth()
+
   return (
-    <BrowserRouter>
       <div className="dashboard-container">
         <header className="header">
           <div className="header-title">
@@ -85,9 +120,15 @@ export default function App() {
               <AlertTriangle size={16} />
               System Status: {ALERT_LEVELS[highestAlert]?.label || 'Normal'}
             </div>
-            <div className="header-time" style={{ marginTop: '8px', fontWeight: '500' }}>
-              <Clock size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
-              Dashboard Refreshed: {lastUpdate ? formatCDT(lastUpdate) : 'Loading...'}
+            <div className="header-time" style={{ marginTop: '8px', fontWeight: '500', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span>
+                <Clock size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
+                Dashboard Refreshed: {lastUpdate ? formatCDT(lastUpdate) : 'Loading...'}
+              </span>
+              <button onClick={signOut} className="sign-out-btn" title="Sign out">
+                <LogOut size={14} />
+                Sign out
+              </button>
             </div>
           </div>
         </header>
@@ -111,6 +152,5 @@ export default function App() {
           </Routes>
         )}
       </div>
-    </BrowserRouter>
   )
 }
